@@ -18,7 +18,6 @@ os.makedirs("downloads", exist_ok=True)
 
 user_data = {}
 
-# ===== ГЛАВНОЕ МЕНЮ =====
 menu_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🎨 Аниме"), KeyboardButton(text="🎞️ Плёнка")],
@@ -28,26 +27,9 @@ menu_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# ===== СТАРТ (автоматически) =====
+# ===== СТАРТ =====
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
-    user_id = message.from_user.id
-    if user_id not in user_data:
-        user_data[user_id] = {"free_used": False, "balance": 0, "action": None, "photos": []}
-    await message.answer(
-        "👋 Привет! Я — AI-фотограф.\n\n"
-        "Я умею:\n"
-        "🎨 Превращать фото в аниме\n"
-        "🎞️ Добавлять эффект плёнки\n"
-        "✨ Ретушировать лицо (30–100%)\n"
-        "👨‍👧 Совмещать два фото\n\n"
-        "Выбери услугу в меню ниже:",
-        reply_markup=menu_keyboard
-    )
-
-# ===== АВТОМАТИЧЕСКИЙ СТАРТ (если пользователь просто написал боту) =====
-@dp.message(lambda msg: msg.text and msg.text.lower() in ["привет", "здравствуй", "hi", "hello", "старт", "start"])
-async def auto_start(message: Message):
     user_id = message.from_user.id
     if user_id not in user_data:
         user_data[user_id] = {"free_used": False, "balance": 0, "action": None, "photos": []}
@@ -83,6 +65,7 @@ async def handle_photo(message: Message):
     if user_id not in user_data or user_data[user_id].get("action") is None:
         await message.answer("❌ Сначала выбери услугу в меню!")
         return
+    
     action = user_data[user_id]["action"]
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
@@ -90,6 +73,7 @@ async def handle_photo(message: Message):
     await bot.download_file(file.file_path, file_path)
     user_data[user_id]["photos"].append(file_path)
 
+    # ===== СОВМЕЩЕНИЕ 2 ФОТО =====
     if action == "👨‍👧 Совместить 2 фото":
         if len(user_data[user_id]["photos"]) == 1:
             await message.answer("✅ Первое фото сохранено! Теперь отправь **второе фото** (взрослого):")
@@ -105,14 +89,15 @@ async def handle_photo(message: Message):
             if result:
                 await message.answer_photo(result, caption="✅ Готово! 👨‍👧")
             else:
-                await message.answer("❌ Ошибка. Попробуй ещё раз.")
+                await message.answer("❌ Ошибка объединения. Попробуй ещё раз.")
             return
 
+    # ===== АНИМЕ / ПЛЁНКА =====
     if action in ["🎨 Аниме", "🎞️ Плёнка"]:
-        await message.answer("⏳ Генерирую...")
+        await message.answer("⏳ Генерирую... (20–40 секунд)")
         prompt_map = {
-            "🎨 Аниме": "anime style, studio ghibli, vibrant colors, detailed line art",
-            "🎞️ Плёнка": "film photo style, kodak portra 400, vintage colors, film grain, nostalgic, warm tones"
+            "🎨 Аниме": "anime style, studio ghibli, vibrant colors, detailed line art, beautiful portrait",
+            "🎞️ Плёнка": "film photo style, kodak portra 400, vintage colors, film grain, nostalgic, warm tones, retro aesthetic"
         }
         prompt = prompt_map.get(action, "beautiful portrait")
         result = call_replicate(file_path, prompt)
@@ -121,13 +106,12 @@ async def handle_photo(message: Message):
             await check_free_and_offer_subscription(message)
         else:
             await message.answer("❌ Ошибка генерации. Попробуй другой промт.")
-        user_data[user_id]["photos"] = []
-        user_data[user_id]["action"] = None
-
+    
+    # ===== РЕТУШЬ =====
     elif action == "✨ Ретушь лица":
         await message.answer("Выбери уровень ретуши:", reply_markup=get_retouch_keyboard())
 
-# ===== РЕТУШЬ =====
+# ===== КНОПКИ РЕТУШИ =====
 def get_retouch_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👶 30%", callback_data="retouch_30")],
@@ -140,29 +124,27 @@ def get_retouch_keyboard():
 async def handle_retouch(call: CallbackQuery):
     user_id = call.from_user.id
     level = call.data.split("_")[1]
-    file_path = user_data[user_id]["photos"][-1] if user_data[user_id]["photos"] else None
-    if not file_path:
-        await call.message.answer("❌ Фото не найдено. Попробуй сначала.")
-        return
-
-    await call.message.answer(f"⏳ Ретушь {level}%...")
+    file_path = user_data[user_id]["photos"][-1]
+    
+    await call.message.answer(f"⏳ Ретушь {level}%... (20–40 секунд)")
     prompt_map = {
-        "30": "portrait retouching, subtle skin smoothing, remove blemishes, natural look",
-        "50": "professional portrait retouching, even skin tone, soft glow, high quality",
-        "80": "magazine retouching, flawless skin, perfect lighting, high definition",
-        "100": "full digital retouching, perfect porcelain skin, high-end fashion photography"
+        "30": "portrait retouching, subtle skin smoothing, remove blemishes, natural look, high quality",
+        "50": "professional portrait retouching, even skin tone, soft glow, high definition, flawless skin",
+        "80": "magazine retouching, flawless skin, perfect lighting, high definition, glamour, professional",
+        "100": "full digital retouching, perfect porcelain skin, high-end fashion photography, flawless, magazine cover"
     }
     prompt = prompt_map.get(level, "portrait retouching")
     result = call_replicate(file_path, prompt)
+    
     if result:
         await call.message.answer_photo(result, caption=f"✅ Ретушь {level}% готова!")
-        await check_free_and_offer_subscription(call.message)
     else:
         await call.message.answer("❌ Ошибка ретуши. Попробуй другое фото.")
+    
     user_data[user_id]["photos"] = []
     user_data[user_id]["action"] = None
 
-# ===== БЕСПЛАТНОЕ ФОТО =====
+# ===== БЕСПЛАТНО / ПЛАТНО =====
 async def check_free_and_offer_subscription(message: Message):
     user_id = message.from_user.id
     if not user_data[user_id].get("free_used", False):
@@ -206,56 +188,52 @@ async def help_cmd(message: Message):
         "Первое фото для Аниме и Плёнки — бесплатно!"
     )
 
-# ===== REPLICATE =====
+# ===== ГЕНЕРАЦИЯ ЧЕРЕЗ REPLICATE =====
 def call_replicate(image_path, prompt):
     try:
         with open(image_path, "rb") as f:
             image_data = base64.b64encode(f.read()).decode("utf-8")
-    except Exception as e:
-        print("Ошибка чтения файла:", e)
-        return None
-
-    url = "https://api.replicate.com/v1/predictions"
-    headers = {
-        "Authorization": f"Bearer {REPLICATE_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "version": "black-forest-labs/flux-dev",
-        "input": {
-            "prompt": prompt,
-            "image": f"data:image/jpeg;base64,{image_data}",
-            "num_outputs": 1
+        
+        url = "https://api.replicate.com/v1/predictions"
+        headers = {
+            "Authorization": f"Bearer {REPLICATE_TOKEN}",
+            "Content-Type": "application/json"
         }
-    }
-    try:
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        data = {
+            "version": "black-forest-labs/flux-dev",
+            "input": {
+                "prompt": prompt,
+                "image": f"data:image/jpeg;base64,{image_data}",
+                "num_outputs": 1
+            }
+        }
+        response = requests.post(url, headers=headers, json=data)
         if response.status_code != 201:
-            print("Replicate error:", response.status_code, response.text)
+            print("Ошибка Replicate:", response.status_code, response.text)
             return None
+        
         prediction_id = response.json()["id"]
-        for _ in range(20):
+        while True:
             time.sleep(3)
-            res = requests.get(f"https://api.replicate.com/v1/predictions/{prediction_id}", headers=headers, timeout=10)
+            res = requests.get(f"https://api.replicate.com/v1/predictions/{prediction_id}", headers=headers)
             result = res.json()
-            status = result.get("status")
-            if status == "succeeded":
+            if result.get("status") == "succeeded":
                 return result["output"][0]
-            if status == "failed":
-                print("Replicate failed:", result.get("error"))
+            if result.get("status") == "failed":
+                print("Ошибка генерации:", result.get("error"))
                 return None
-        return None
     except Exception as e:
-        print("Replicate exception:", e)
+        print("Исключение:", e)
         return None
 
 def call_replicate_merge(image1_path, image2_path):
-    # Временно возвращаем первое фото
+    # Заглушка для объединения — пока возвращаем первое фото
+    # В будущем можно подключить специальную модель для объединения
     return image1_path
 
 # ===== ЗАПУСК =====
 async def main():
-    print("🚀 DreamBot с реальной генерацией и авто-стартом запущен!")
+    print("🚀 DreamBot с реальной генерацией запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
