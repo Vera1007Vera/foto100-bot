@@ -7,6 +7,7 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.types import Message, CallbackQuery
+from aiohttp import web
 
 TOKEN = os.getenv("TOKEN")
 REPLICATE_TOKEN = os.getenv("REPLICATE_TOKEN")
@@ -231,10 +232,26 @@ def call_replicate_merge(image1_path, image2_path):
     # В будущем можно подключить специальную модель для объединения
     return image1_path
 
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
+async def health_check(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    print("🌐 Веб-сервер запущен на порту 8080")
+
 # ===== ЗАПУСК =====
 async def main():
     print("🚀 DreamBot с реальной генерацией запущен!")
-    await dp.start_polling(bot)
+    await asyncio.gather(
+        dp.start_polling(bot),
+        start_web_server()
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
