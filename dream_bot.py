@@ -4,9 +4,12 @@ import time
 import requests
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
+from dotenv import load_dotenv
 from aiohttp import web
 
-import os
+load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 REPLICATE_TOKEN = os.getenv("REPLICATE_TOKEN")
