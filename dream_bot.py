@@ -8,8 +8,6 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.types import Message, CallbackQuery
 from aiohttp import web
 
-load_dotenv()
-
 TOKEN = os.getenv("TOKEN")
 REPLICATE_TOKEN = os.getenv("REPLICATE_TOKEN")
 
