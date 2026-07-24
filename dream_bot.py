@@ -40,7 +40,7 @@ async def start_cmd(message: Message):
         "🎨 Превращать фото в аниме\n"
         "🎞️ Добавлять эффект плёнки\n"
         "✨ Ретушировать лицо (30–100%)\n"
-        "👨‍👧 Совмещать два фото\n\n"
+        "👨‍👧 Совмещать два фото в одну сцену\n\n"
         "Выбери услугу в меню ниже:",
         reply_markup=menu_keyboard
     )
@@ -80,7 +80,7 @@ async def handle_photo(message: Message):
             await message.answer("✅ Первое фото сохранено! Теперь отправь **второе фото** (взрослого):")
             return
         elif len(user_data[user_id]["photos"]) == 2:
-            await message.answer("⏳ Объединяю два фото...")
+            await message.answer("⏳ Объединяю два фото в одну сцену... (30–60 секунд)")
             result = call_replicate_merge(
                 user_data[user_id]["photos"][0],
                 user_data[user_id]["photos"][1]
@@ -97,8 +97,8 @@ async def handle_photo(message: Message):
     if action in ["🎨 Аниме", "🎞️ Плёнка"]:
         await message.answer("⏳ Генерирую... (20–40 секунд)")
         prompt_map = {
-            "🎨 Аниме": "anime style, studio ghibli, vibrant colors, detailed line art, beautiful portrait",
-            "🎞️ Плёнка": "film photo style, kodak portra 400, vintage colors, film grain, nostalgic, warm tones, retro aesthetic"
+            "🎨 Аниме": "anime style, studio ghibli, vibrant colors, detailed line art, beautiful portrait, keep the person's face exactly the same, identity preservation",
+            "🎞️ Плёнка": "film photo style, kodak portra 400, vintage colors, film grain, nostalgic, warm tones, retro aesthetic, keep the person's face exactly the same, identity preservation"
         }
         prompt = prompt_map.get(action, "beautiful portrait")
         result = call_replicate(file_path, prompt)
@@ -128,14 +128,7 @@ async def handle_retouch(call: CallbackQuery):
     file_path = user_data[user_id]["photos"][-1]
     
     await call.message.answer(f"⏳ Ретушь {level}%... (20–40 секунд)")
-    prompt_map = {
-        "30": "portrait retouching, subtle skin smoothing, remove blemishes, natural look, high quality",
-        "50": "professional portrait retouching, even skin tone, soft glow, high definition, flawless skin",
-        "80": "magazine retouching, flawless skin, perfect lighting, high definition, glamour, professional",
-        "100": "full digital retouching, perfect porcelain skin, high-end fashion photography, flawless, magazine cover"
-    }
-    prompt = prompt_map.get(level, "portrait retouching")
-    result = call_replicate(file_path, prompt)
+    result = call_replicate_retouch(file_path, level)
     
     if result:
         await call.message.answer_photo(result, caption=f"✅ Ретушь {level}% готова!")
@@ -189,7 +182,7 @@ async def help_cmd(message: Message):
         "Первое фото для Аниме и Плёнки — бесплатно!"
     )
 
-# ===== ГЕНЕРАЦИЯ ЧЕРЕЗ REPLICATE =====
+# ===== ГЕНЕРАЦИЯ ЧЕРЕЗ REPLICATE (АНИМЕ / ПЛЁНКА) =====
 def call_replicate(image_path, prompt):
     try:
         with open(image_path, "rb") as f:
@@ -205,7 +198,8 @@ def call_replicate(image_path, prompt):
             "input": {
                 "prompt": prompt,
                 "image": f"data:image/jpeg;base64,{image_data}",
-                "num_outputs": 1
+                "num_outputs": 1,
+                "strength": 0.5
             }
         }
         response = requests.post(url, headers=headers, json=data)
@@ -227,10 +221,102 @@ def call_replicate(image_path, prompt):
         print("Исключение:", e)
         return None
 
+# ===== РЕТУШЬ ЧЕРЕЗ CODEFORMER =====
+def call_replicate_retouch(image_path, level):
+    try:
+        with open(image_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+        
+        url = "https://api.replicate.com/v1/predictions"
+        headers = {
+            "Authorization": f"Bearer {REPLICATE_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        strength = int(level) / 100
+        
+        data = {
+            "version": "sczhou/codeformer:7de2ea26c616d5a6f7a2bd8be49d12d2c7a602e2d4ff1c06dfd96e9231f12d5e",
+            "input": {
+                "image": f"data:image/jpeg;base64,{image_data}",
+                "codeformer_fidelity": strength,
+                "face_upsample": True,
+                "background_upsample": True
+            }
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code != 201:
+            print("Ошибка CodeFormer:", response.status_code, response.text)
+            return None
+        
+        prediction_id = response.json()["id"]
+        while True:
+            time.sleep(3)
+            res = requests.get(f"https://api.replicate.com/v1/predictions/{prediction_id}", headers=headers)
+            result = res.json()
+            if result.get("status") == "succeeded":
+                return result["output"]
+            if result.get("status") == "failed":
+                print("Ошибка ретуши:", result.get("error"))
+                return None
+    except Exception as e:
+        print("Исключение в ретуши:", e)
+        return None
+
+# ===== СОВМЕЩЕНИЕ 2 ФОТО В ОДНУ СЦЕНУ =====
 def call_replicate_merge(image1_path, image2_path):
-    # Заглушка для объединения — пока возвращаем первое фото
-    # В будущем можно подключить специальную модель для объединения
-    return image1_path
+    try:
+        with open(image1_path, "rb") as f:
+            img1_data = base64.b64encode(f.read()).decode("utf-8")
+        with open(image2_path, "rb") as f:
+            img2_data = base64.b64encode(f.read()).decode("utf-8")
+        
+        url = "https://api.replicate.com/v1/predictions"
+        headers = {
+            "Authorization": f"Bearer {REPLICATE_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        prompt = (
+            "A heartwarming scene where an adult is squatting and holding a birthday cake, "
+            "and a young child is blowing out the candles. Both are looking at each other with love. "
+            "The adult is smiling, the child is happy. The atmosphere is warm and festive. "
+            "Realistic, high quality, 8k, emotional moment. "
+            "The adult has the same face as in the first image. "
+            "The child has the same face as in the second image. "
+            "Accurate facial features, identity preservation."
+        )
+        
+        data = {
+            "version": "black-forest-labs/flux-dev",
+            "input": {
+                "prompt": prompt,
+                "image": f"data:image/jpeg;base64,{img1_data}",
+                "image2": f"data:image/jpeg;base64,{img2_data}",
+                "num_outputs": 1,
+                "strength": 0.6
+            }
+        }
+        
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code != 201:
+            print("Ошибка Replicate:", response.status_code, response.text)
+            return None
+        
+        prediction_id = response.json()["id"]
+        while True:
+            time.sleep(3)
+            res = requests.get(f"https://api.replicate.com/v1/predictions/{prediction_id}", headers=headers)
+            result = res.json()
+            if result.get("status") == "succeeded":
+                return result["output"][0]
+            if result.get("status") == "failed":
+                print("Ошибка генерации:", result.get("error"))
+                return None
+    except Exception as e:
+        print("Исключение в объединении:", e)
+        return None
 
 # ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 async def health_check(request):
@@ -241,10 +327,9 @@ async def start_web_server():
     app.router.add_get("/", health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
-    print(f"🌐 Веб-сервер запущен на порту {port}")
+    print("🌐 Веб-сервер запущен на порту 8080")
 
 # ===== ЗАПУСК =====
 async def main():
