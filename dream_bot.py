@@ -12,11 +12,16 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiohttp import web
 from dotenv import load_dotenv
-import insightface
-from insightface.app import FaceAnalysis
-from diffusers import StableDiffusionImg2ImgPipeline
-import torch
-from rembg import remove
+
+# ===== ПРОВЕРКА НАЛИЧИЯ INSIGHTFACE =====
+try:
+    import insightface
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+    print("✅ InsightFace загружен")
+except ImportError:
+    INSIGHTFACE_AVAILABLE = False
+    print("⚠️ InsightFace не установлен, ретушь в упрощённом режиме")
 
 load_dotenv()
 
@@ -42,7 +47,7 @@ conn.commit()
 os.makedirs("downloads", exist_ok=True)
 
 # ===== ХРАНИЛИЩЕ СОСТОЯНИЙ =====
-user_states = {}  # user_id: {"action": str, "photos": list}
+user_states = {}
 
 # ===== МЕНЮ =====
 menu_keyboard = ReplyKeyboardMarkup(
@@ -61,28 +66,14 @@ face_app = None
 
 def init_face_app():
     global face_app
+    if not INSIGHTFACE_AVAILABLE:
+        return None
     if face_app is None:
         face_app = FaceAnalysis(name='buffalo_l')
         face_app.prepare(ctx_id=0, det_size=(640, 640))
     return face_app
 
-# ===== ИНИЦИАЛИЗАЦИЯ МОДЕЛИ АНИМЕ =====
-anime_pipe = None
-
-def load_anime_model():
-    global anime_pipe
-    if anime_pipe is None:
-        print("⏳ Загрузка модели аниме (первый раз может занять 2-3 минуты)...")
-        anime_pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
-            "Nitrosocke/Ghibli-Diffusion",
-            torch_dtype=torch.float32
-        )
-        if torch.backends.mps.is_available():
-            anime_pipe = anime_pipe.to("mps")
-        print("✅ Модель аниме загружена!")
-    return anime_pipe
-
-# ===== СТАРТ (КОМАНДА /start) =====
+# ===== СТАРТ =====
 @dp.message(Command("start"))
 async def start_cmd(message: Message):
     user_id = message.from_user.id
@@ -113,7 +104,7 @@ async def start_cmd(message: Message):
         "Я умею:\n"
         "🎨 Превращать фото в аниме\n"
         "🎞️ Добавлять эффект плёнки\n"
-        "✨ Ретушировать лицо (Тон, Сглаживание, Глаза, Зубы, Комбо)\n"
+        "✨ Ретушировать лицо\n"
         "🌄 Заменять фон\n"
         "👨‍👧 Совмещать два фото\n\n"
         "Выбери услугу в меню ниже:"
@@ -219,7 +210,7 @@ async def handle_photo(message: Message):
 # ===== КНОПКИ РЕТУШИ =====
 def get_retouch_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ Комбо (все сразу)", callback_data="retouch_combo")],
+        [InlineKeyboardButton(text="⭐ Комбо", callback_data="retouch_combo")],
         [InlineKeyboardButton(text="👶 Тон кожи", callback_data="retouch_skin")],
         [InlineKeyboardButton(text="✨ Сгладить кожу", callback_data="retouch_smooth")],
         [InlineKeyboardButton(text="👁️ Осветлить глаза", callback_data="retouch_eyes")],
@@ -244,7 +235,7 @@ async def handle_retouch(call: CallbackQuery):
         return
     
     file_path = user_states[user_id]["photos"][-1]
-    await call.message.answer(f"⏳ Обработка...")
+    await call.message.answer("⏳ Обработка...")
     
     if action == "combo":
         result = retouch_combo(file_path)
@@ -360,7 +351,54 @@ async def help_cmd(message: Message):
 
 # ===== ЛОКАЛЬНЫЕ ФУНКЦИИ =====
 
-# ----- Ретушь -----
+def retouch_face(image_path, level):
+    """Ретушь лица"""
+    if not INSIGHTFACE_AVAILABLE:
+        return retouch_face_simple(image_path, level)
+    try:
+        app = init_face_app()
+        img = cv2.imread(image_path)
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        faces = app.get(img_rgb)
+        if len(faces) == 0:
+            return retouch_face_simple(image_path, level)
+        face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+        x1, y1, x2, y2 = face.bbox.astype(int)
+        strength = int(level) / 100
+        face_region = img_rgb[y1:y2, x1:x2]
+        kernel_size = int(21 * strength) + 1
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        blurred = cv2.bilateralFilter(face_region, kernel_size, 75, 75)
+        result_face = cv2.addWeighted(face_region, 1 - strength * 0.7, blurred, strength * 0.7, 0)
+        result = img_rgb.copy()
+        result[y1:y2, x1:x2] = result_face
+        result_bgr = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+        output_path = image_path.replace(".jpg", f"_retouched_{level}.jpg")
+        cv2.imwrite(output_path, result_bgr)
+        return output_path
+    except Exception as e:
+        print("Ошибка ретуши:", e)
+        return retouch_face_simple(image_path, level)
+
+def retouch_face_simple(image_path, level):
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        strength = int(level) / 100
+        kernel_size = int(21 * strength) + 1
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        blurred = cv2.GaussianBlur(img, (kernel_size, kernel_size), 0)
+        result = cv2.addWeighted(img, 1 - strength * 0.7, blurred, strength * 0.7, 0)
+        output_path = image_path.replace(".jpg", f"_retouched_{level}.jpg")
+        cv2.imwrite(output_path, result)
+        return output_path
+    except Exception as e:
+        print("Ошибка simple_retouch:", e)
+        return None
+
 def retouch_skin_tone(image_path):
     try:
         img = cv2.imread(image_path)
@@ -397,6 +435,8 @@ def retouch_eyes(image_path):
         img = cv2.imread(image_path)
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         app = init_face_app()
+        if app is None:
+            return None
         faces = app.get(img_rgb)
         if len(faces) == 0:
             return None
@@ -445,18 +485,19 @@ def retouch_combo(image_path):
         result = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
         result = cv2.bilateralFilter(result, 9, 75, 75)
         app = init_face_app()
-        faces = app.get(result)
-        if len(faces) > 0:
-            face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
-            landmarks = face.landmark_2d_106
-            left_eye = landmarks[90:103].mean(axis=0)
-            right_eye = landmarks[60:73].mean(axis=0)
-            for eye in [left_eye, right_eye]:
-                x, y = int(eye[0]), int(eye[1])
-                r = 20
-                eye_region = result[y-r:y+r, x-r:x+r]
-                eye_region = cv2.convertScaleAbs(eye_region, alpha=1.2, beta=15)
-                result[y-r:y+r, x-r:x+r] = eye_region
+        if app is not None:
+            faces = app.get(result)
+            if len(faces) > 0:
+                face = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+                landmarks = face.landmark_2d_106
+                left_eye = landmarks[90:103].mean(axis=0)
+                right_eye = landmarks[60:73].mean(axis=0)
+                for eye in [left_eye, right_eye]:
+                    x, y = int(eye[0]), int(eye[1])
+                    r = 20
+                    eye_region = result[y-r:y+r, x-r:x+r]
+                    eye_region = cv2.convertScaleAbs(eye_region, alpha=1.2, beta=15)
+                    result[y-r:y+r, x-r:x+r] = eye_region
         result_hsv = cv2.cvtColor(result, cv2.COLOR_RGB2HSV)
         result_hsv[:, :, 2] = cv2.addWeighted(result_hsv[:, :, 2], 1.1, np.zeros_like(result_hsv[:, :, 2]), 0, 20)
         result = cv2.cvtColor(result_hsv, cv2.COLOR_HSV2RGB)
@@ -465,12 +506,102 @@ def retouch_combo(image_path):
         cv2.imwrite(output_path, result_bgr)
         return output_path
     except Exception as e:
-        print("Ошибка комбо-ретуши:", e)
+        print("Ошибка комбо:", e)
         return None
 
-# ----- Замена фона -----
+def apply_anime_style(image_path):
+    """Улучшенный аниме-стиль через OpenCV"""
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return None
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.3, 0, 255).astype(np.uint8)
+        img = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        img = cv2.bilateralFilter(img, 9, 75, 75)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+        edges = cv2.dilate(edges, None, iterations=1)
+        edges = cv2.bitwise_not(edges)
+        edges_3ch = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        result = cv2.addWeighted(img, 0.75, edges_3ch, 0.25, 0)
+        lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge((l, a, b))
+        result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+        result = cv2.stylization(result, sigma_s=60, sigma_r=0.6)
+        output_path = image_path.replace(".jpg", "_anime.jpg")
+        cv2.imwrite(output_path, result)
+        return output_path
+    except Exception as e:
+        print("Ошибка аниме:", e)
+        return None
+
+def apply_film_effect(image_path):
+    try:
+        img = Image.open(image_path).convert("RGB")
+        r, g, b = img.split()
+        r = r.point(lambda i: i * 1.08)
+        g = g.point(lambda i: i * 0.97)
+        b = b.point(lambda i: i * 0.88)
+        img = Image.merge("RGB", (r, g, b))
+        img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.2)
+        enhancer = ImageEnhance.Color(img)
+        img = enhancer.enhance(1.15)
+        width, height = img.size
+        vignette = Image.new("L", (width, height), 0)
+        for x in range(width):
+            for y in range(height):
+                dx = (x - width/2) / (width/2)
+                dy = (y - height/2) / (height/2)
+                distance = (dx*dx + dy*dy) ** 0.5
+                value = max(0, min(255, int(255 * (1 - distance * 0.35))))
+                vignette.putpixel((x, y), value)
+        img_r, img_g, img_b = img.split()
+        img_r = Image.composite(img_r, Image.new("L", (width, height), 0), vignette)
+        img_g = Image.composite(img_g, Image.new("L", (width, height), 0), vignette)
+        img_b = Image.composite(img_b, Image.new("L", (width, height), 0), vignette)
+        img = Image.merge("RGB", (img_r, img_g, img_b))
+        pixels = img.load()
+        for i in range(width):
+            for j in range(height):
+                noise = random.randint(-15, 15)
+                r, g, b = pixels[i, j]
+                pixels[i, j] = (min(255, max(0, r + noise)), min(255, max(0, g + noise)), min(255, max(0, b + noise)))
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(1.02)
+        output_path = image_path.replace(".jpg", "_film.jpg")
+        img.save(output_path)
+        return output_path
+    except Exception as e:
+        print("Ошибка плёнки:", e)
+        return None
+
+def merge_photos(image1_path, image2_path):
+    try:
+        img1 = Image.open(image1_path)
+        img2 = Image.open(image2_path)
+        height = min(img1.height, img2.height)
+        img1 = img1.resize((int(img1.width * height / img1.height), height))
+        img2 = img2.resize((int(img2.width * height / img2.height), height))
+        total_width = img1.width + img2.width + 20
+        new_img = Image.new('RGB', (total_width, height), (255, 255, 255))
+        new_img.paste(img1, (0, 0))
+        new_img.paste(img2, (img1.width + 20, 0))
+        output_path = image1_path.replace(".jpg", "_merged.jpg")
+        new_img.save(output_path)
+        return output_path
+    except Exception as e:
+        print("Ошибка объединения:", e)
+        return None
+
 def change_background(image_path, background_type="white"):
     try:
+        from rembg import remove
         with open(image_path, "rb") as f:
             input_data = f.read()
         output_data = remove(input_data)
@@ -516,94 +647,6 @@ def change_background(image_path, background_type="white"):
         print("Ошибка замены фона:", e)
         return None
 
-# ----- Аниме -----
-def apply_anime_style(image_path):
-    try:
-        pipe = load_anime_model()
-        init_image = Image.open(image_path).convert("RGB")
-        init_image = init_image.resize((512, 512))
-        prompt = (
-            "anime style, studio ghibli, beautiful portrait, "
-            "exactly the same person, same face, same features, "
-            "keep the person's face recognizable, identity preservation, "
-            "vibrant colors, detailed, high quality"
-        )
-        result = pipe(
-            prompt=prompt,
-            image=init_image,
-            strength=0.4,
-            guidance_scale=7.0,
-            num_inference_steps=20
-        ).images[0]
-        output_path = image_path.replace(".jpg", "_anime.jpg")
-        result.save(output_path)
-        return output_path
-    except Exception as e:
-        print("Ошибка аниме:", e)
-        return None
-
-# ----- Плёнка -----
-def apply_film_effect(image_path):
-    try:
-        img = Image.open(image_path).convert("RGB")
-        r, g, b = img.split()
-        r = r.point(lambda i: i * 1.08)
-        g = g.point(lambda i: i * 0.97)
-        b = b.point(lambda i: i * 0.88)
-        img = Image.merge("RGB", (r, g, b))
-        img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.2)
-        enhancer = ImageEnhance.Color(img)
-        img = enhancer.enhance(1.15)
-        width, height = img.size
-        vignette = Image.new("L", (width, height), 0)
-        for x in range(width):
-            for y in range(height):
-                dx = (x - width/2) / (width/2)
-                dy = (y - height/2) / (height/2)
-                distance = (dx*dx + dy*dy) ** 0.5
-                value = max(0, min(255, int(255 * (1 - distance * 0.35))))
-                vignette.putpixel((x, y), value)
-        img_r, img_g, img_b = img.split()
-        img_r = Image.composite(img_r, Image.new("L", (width, height), 0), vignette)
-        img_g = Image.composite(img_g, Image.new("L", (width, height), 0), vignette)
-        img_b = Image.composite(img_b, Image.new("L", (width, height), 0), vignette)
-        img = Image.merge("RGB", (img_r, img_g, img_b))
-        pixels = img.load()
-        for i in range(width):
-            for j in range(height):
-                noise = random.randint(-15, 15)
-                r, g, b = pixels[i, j]
-                pixels[i, j] = (min(255, max(0, r + noise)), min(255, max(0, g + noise)), min(255, max(0, b + noise)))
-        enhancer = ImageEnhance.Brightness(img)
-        img = enhancer.enhance(1.02)
-        output_path = image_path.replace(".jpg", "_film.jpg")
-        img.save(output_path)
-        return output_path
-    except Exception as e:
-        print("Ошибка плёнки:", e)
-        return None
-
-# ----- Совмещение -----
-def merge_photos(image1_path, image2_path):
-    try:
-        img1 = Image.open(image1_path)
-        img2 = Image.open(image2_path)
-        height = min(img1.height, img2.height)
-        img1 = img1.resize((int(img1.width * height / img1.height), height))
-        img2 = img2.resize((int(img2.width * height / img2.height), height))
-        total_width = img1.width + img2.width + 20
-        new_img = Image.new('RGB', (total_width, height), (255, 255, 255))
-        new_img.paste(img1, (0, 0))
-        new_img.paste(img2, (img1.width + 20, 0))
-        output_path = image1_path.replace(".jpg", "_merged.jpg")
-        new_img.save(output_path)
-        return output_path
-    except Exception as e:
-        print("Ошибка объединения:", e)
-        return None
-
 # ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 async def health_check(request):
     return web.Response(text="OK")
@@ -619,7 +662,7 @@ async def start_web_server():
 
 # ===== ЗАПУСК =====
 async def main():
-    print("🚀 DreamBot с локальным AI запущен!")
+    print("🚀 DreamBot запущен!")
     await asyncio.gather(
         dp.start_polling(bot),
         start_web_server()
@@ -627,4 +670,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
